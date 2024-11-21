@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"data-explorer-convertor/models"
 )
 
-func main() {
+var order = 1
 
+func main() {
 	if len(os.Args) < 4 {
 		fmt.Println("Error: Please provide input, output filenames and title as arguments.")
 		os.Exit(1)
@@ -37,8 +40,8 @@ func checkFileExists(filename string) error {
 
 func convertToDataExplorer(inputFile string, outputFile string, dashboardTitle string) {
 	inputData, _ := os.ReadFile(inputFile)
-	var d map[string]interface{}
-	json.Unmarshal(inputData, &d)
+	var grafanaDashboard models.GrafanaDashboard
+	json.Unmarshal(inputData, &grafanaDashboard)
 
 	outputJson := make(map[string]interface{})
 	header := make(map[string]interface{})
@@ -46,72 +49,23 @@ func convertToDataExplorer(inputFile string, outputFile string, dashboardTitle s
 	header["dateTimeRange"] = true
 	header["dropdowns"] = []interface{}{}
 
-	tabs := []interface{}{}
-	tab := make(map[string]interface{})
-	tabs = append(tabs, tab)
-	tab["key"] = dashboardTitle
-	tab["order"] = "1"
-	tab["title"] = dashboardTitle
-	tab["type"] = "metrics"
+	tabs := []models.Tab{}
 
-	order := 1
+	tab := models.Tab{}
+	tab.Key = dashboardTitle
+	tab.Order = 1
+	tab.Title = dashboardTitle
+	tab.Type = "metrics"
 
-	queryList := []map[string]interface{}{}
-	for _, row := range d["rows"].([]interface{}) {
-		for _, panel := range row.(map[string]interface{})["panels"].([]interface{}) {
-			for _, target := range panel.(map[string]interface{})["targets"].([]interface{}) {
-				title := ""
+	queryList := []models.QueryItem{}
 
-				if len(panel.(map[string]interface{})["targets"].([]interface{})) > 1 {
-					legendSplit := strings.Split(target.(map[string]interface{})["legendFormat"].(string), " - ")
-					title = panel.(map[string]interface{})["title"].(string) + " - " + legendSplit[len(legendSplit)-1] + " query"
-				} else {
-					title = panel.(map[string]interface{})["title"].(string) + " query"
-				}
-
-				query := make(map[string]interface{})
-				query["name"] = title
-				if panel.(map[string]interface{})["lines"] != nil && panel.(map[string]interface{})["lines"].(bool) {
-					query["chart_type"] = "line"
-				}
-				query["data_source_name"] = "Apica Monitoring" //
-
-				options := make(map[string]interface{})
-				query["options"] = options
-				options["description"] = title
-				options["order"] = order
-				order += 1
-				plot := make(map[string]interface{})
-				options["plot"] = plot
-				plot["errorColumn"] = ""
-				plot["groupBy"] = ""
-				plot["x"] = "Timestamp"
-				plot["xLabel"] = "Timestamp"
-				plot["y"] = []string{"value"}
-				plot["yLabel"] = "value"
-				options["upperLimit"] = ""
-				queryExpr := target.(map[string]interface{})["expr"].(string)
-				queryExpr = strings.ReplaceAll(queryExpr, "$namespace", "{{namespace}}")
-				if queryExpr != strings.ReplaceAll(queryExpr, ",service=~\"$service\"", "") {
-					queryExpr = strings.ReplaceAll(queryExpr, ",service=~\"$service\"", "")
-					queryExpr = strings.ReplaceAll(queryExpr, ", quantile=", " quantile=")
-					queryExpr = strings.ReplaceAll(queryExpr, ",quantile=", "quantile=")
-				} else if queryExpr != strings.ReplaceAll(queryExpr, ", service=~\"$service\"", "") {
-					queryExpr = strings.ReplaceAll(queryExpr, ", service=~\"$service\"", "")
-					queryExpr = strings.ReplaceAll(queryExpr, ", quantile=", " quantile=")
-					queryExpr = strings.ReplaceAll(queryExpr, ",quantile=", "quantile=")
-				}
-				queryExpr += "&duration=1h&step=5m"
-				query["query"] = queryExpr
-				query["schema"] = ""
-
-				queryList = append(queryList, query)
-			}
-		}
+	for _, panel := range grafanaDashboard.Panels {
+		getExprsFromPanel(panel, &queryList)
 	}
 
-	tab["queriesList"] = queryList
+	tab.QueriesList = queryList
 
+	tabs = append(tabs, tab)
 	outputJson["tabs"] = tabs
 
 	byteData, _ := json.MarshalIndent(outputJson, "", "    ")
@@ -132,5 +86,61 @@ func convertToDataExplorer(inputFile string, outputFile string, dashboardTitle s
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+}
+
+func getExprsFromPanel(panel models.Panel, queryList *[]models.QueryItem) {
+	for _, target := range panel.Targets {
+		title := ""
+		if target.QueryExpr != nil {
+			if len(panel.Targets) > 1 {
+				if target.Legend != nil {
+					// If "legendFormat" exists and is a string, split it
+					legendFormat := *target.Legend
+					legendSplit := strings.Split(legendFormat, " - ")
+					title = panel.Title + " - " + legendSplit[len(legendSplit)-1] + " query"
+				}
+			} else {
+				title = panel.Title + " query"
+			}
+
+			query := models.QueryItem{}
+			query.Name = title
+			if panel.IsLines != nil && *panel.IsLines {
+				*query.ChartType = "line"
+			}
+			// query["data_source_name"] = "Apica Monitoring" //
+
+			options := models.QueryOptions{}
+			options.Description = title
+			options.Order = order
+			order += 1
+			options.Plot = models.NewQueryPlot()
+			options.UpperLimit = ""
+			query.Options = options
+
+			queryExpr := *target.QueryExpr
+			queryExpr = strings.ReplaceAll(queryExpr, "$namespace", "{{namespace}}")
+			if queryExpr != strings.ReplaceAll(queryExpr, ",service=~\"$service\"", "") {
+				queryExpr = strings.ReplaceAll(queryExpr, ",service=~\"$service\"", "")
+				queryExpr = strings.ReplaceAll(queryExpr, ", quantile=", " quantile=")
+				queryExpr = strings.ReplaceAll(queryExpr, ",quantile=", "quantile=")
+			} else if queryExpr != strings.ReplaceAll(queryExpr, ", service=~\"$service\"", "") {
+				queryExpr = strings.ReplaceAll(queryExpr, ", service=~\"$service\"", "")
+				queryExpr = strings.ReplaceAll(queryExpr, ", quantile=", " quantile=")
+				queryExpr = strings.ReplaceAll(queryExpr, ",quantile=", "quantile=")
+			}
+			queryExpr += "&duration=1h&step=5m"
+			query.Query = queryExpr
+			query.Schema = ""
+
+			*queryList = append(*queryList, query)
+		}
+	}
+
+	if panel.Panels != nil {
+		for _, p := range *panel.Panels {
+			getExprsFromPanel(p, queryList)
+		}
 	}
 }
